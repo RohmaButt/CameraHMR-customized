@@ -1,4 +1,6 @@
 import cv2
+import sys, os
+sys.path.insert(0, os.path.abspath('./detectron2-customized'))
 import os
 import json
 import torch
