@@ -190,14 +190,85 @@ class OptimizedChestLogo3D:
         
         return chest_center, chest_normal, right_vector, up_vector
     
+    @lru_cache(maxsize=32)
+    def load_and_validate_logo_cached(self, logo_path):
+        """ENHANCED: Load logo with automatic white background removal and transparency detection"""
+        if self._cached_logo_path == logo_path and self._cached_logo is not None:
+            return self._cached_logo
+        
+        try:
+            logo_pil = Image.open(logo_path).convert("RGBA")
+            logo_array = np.array(logo_pil)
+            
+            if logo_array.shape[0] < 32 or logo_array.shape[1] < 32:
+                print(f"Warning: Logo is very small ({logo_array.shape[1]}x{logo_array.shape[0]})")
+            
+            # ENHANCED: Automatic white background removal
+            logo_array = self._remove_white_background(logo_array)
+            
+            self._cached_logo = logo_array
+            self._cached_logo_path = logo_path
+            
+            print(f"Logo loaded with enhanced transparency processing: {logo_array.shape}")
+            return logo_array
+            
+        except Exception as e:
+            print(f"Error loading logo: {e}")
+            return None
+
+    def _remove_white_background(self, logo_array):
+        """Remove white/near-white backgrounds and convert to transparent"""
+        rgb = logo_array[:, :, :3]
+        alpha = logo_array[:, :, 3] if logo_array.shape[2] == 4 else np.full(rgb.shape[:2], 255, dtype=np.uint8)
+        
+        # Define white/near-white threshold
+        white_threshold = 240  # Adjust this value (0-255) to catch more/fewer "white" pixels
+        
+        # Create mask for white/near-white pixels
+        # A pixel is considered white if all RGB values are above the threshold
+        white_mask = np.all(rgb >= white_threshold, axis=2)
+        
+        # Also check for light gray backgrounds
+        light_gray_threshold = 230
+        light_gray_mask = np.all(rgb >= light_gray_threshold, axis=2) & np.all(np.abs(rgb - np.mean(rgb, axis=2, keepdims=True)) < 10, axis=2)
+        
+        # Combine masks
+        background_mask = white_mask | light_gray_mask
+        
+        # Set alpha to 0 for background pixels
+        alpha[background_mask] = 0
+        
+        # For edge smoothing, create a gradient around the edges
+        from scipy import ndimage
+        
+        # Create distance transform from non-background pixels
+        foreground_mask = ~background_mask
+        if np.any(foreground_mask):
+            # Dilate the foreground slightly to create anti-aliased edges
+            dilated = ndimage.binary_dilation(foreground_mask, iterations=2)
+            edge_mask = dilated & ~foreground_mask
+            
+            # Create gradient alpha for edge pixels
+            if np.any(edge_mask):
+                alpha[edge_mask] = 128  # Semi-transparent edges
+        
+        # Combine RGB and alpha
+        result = np.dstack([rgb, alpha])
+        
+        print(f"Background removal: {np.sum(background_mask)} pixels made transparent")
+        return result
+
     def create_chest_focused_texture(self, vertices, faces, chest_center, right_vector, up_vector, logo_image, logo_size=0.15):
-        """OPTIMIZED: Create texture with parallel processing and vectorized operations"""
+        """ENHANCED: Create texture with smart alpha blending and background removal"""
         # Pre-allocate arrays
         texture_size = 1024
         base_texture = np.full((texture_size, texture_size, 3), [210, 180, 140], dtype=np.uint8)
         
+        # Apply logo orientation correction
+        logo_corrected = cv2.rotate(logo_image, cv2.ROTATE_180)
+        
         # Optimized logo resizing
-        logo_h, logo_w = logo_image.shape[:2]
+        logo_h, logo_w = logo_corrected.shape[:2]
         logo_aspect = logo_w / logo_h
         logo_pixel_size = int(texture_size * logo_size * 0.6)
         
@@ -212,7 +283,7 @@ class OptimizedChestLogo3D:
         logo_height = max(48, logo_height)
         
         # Use faster interpolation for resizing
-        logo_resized = cv2.resize(logo_image, (logo_width, logo_height), interpolation=cv2.INTER_LINEAR)
+        logo_resized = cv2.resize(logo_corrected, (logo_width, logo_height), interpolation=cv2.INTER_LINEAR)
         
         # OPTIMIZED: Parallel UV mapping
         uv_coords = self._create_curvature_aware_uv_mapping_optimized(vertices, faces, chest_center, right_vector, up_vector)
@@ -225,21 +296,83 @@ class OptimizedChestLogo3D:
         start_x = max(0, min(start_x, texture_size - logo_width))
         start_y = max(0, min(start_y, texture_size - logo_height))
         
-        # Optimized alpha blending
+        # ENHANCED: Smart alpha blending
         if logo_resized.shape[2] == 4:
-            alpha = logo_resized[:, :, 3:4] / 255.0
+            alpha = logo_resized[:, :, 3].astype(np.float32) / 255.0
             logo_rgb = logo_resized[:, :, :3]
+            
+            # Get the texture region
+            texture_region = base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width].astype(np.float32)
+            logo_rgb_float = logo_rgb.astype(np.float32)
+            
+            # ENHANCED: Multi-threshold alpha blending
+            # Create different alpha levels for better blending
+            high_alpha_mask = alpha > 0.8      # Fully opaque pixels
+            med_alpha_mask = (alpha > 0.3) & (alpha <= 0.8)  # Semi-transparent pixels  
+            low_alpha_mask = (alpha > 0.05) & (alpha <= 0.3)  # Edge pixels
+            transparent_mask = alpha <= 0.05   # Fully transparent pixels
+            
+            blended = texture_region.copy()
+            
+            # Apply different blending strategies
+            if np.any(high_alpha_mask):
+                # Full logo color for high alpha
+                alpha_3d = np.stack([alpha] * 3, axis=2)
+                blended[high_alpha_mask] = (
+                    alpha_3d[high_alpha_mask] * logo_rgb_float[high_alpha_mask] + 
+                    (1 - alpha_3d[high_alpha_mask]) * texture_region[high_alpha_mask]
+                )
+            
+            if np.any(med_alpha_mask):
+                # Standard alpha blending for medium alpha
+                alpha_3d = np.stack([alpha] * 3, axis=2)
+                blended[med_alpha_mask] = (
+                    alpha_3d[med_alpha_mask] * logo_rgb_float[med_alpha_mask] + 
+                    (1 - alpha_3d[med_alpha_mask]) * texture_region[med_alpha_mask]
+                )
+            
+            if np.any(low_alpha_mask):
+                # Soft blending for edges
+                alpha_3d = np.stack([alpha] * 3, axis=2)
+                blended[low_alpha_mask] = (
+                    alpha_3d[low_alpha_mask] * logo_rgb_float[low_alpha_mask] + 
+                    (1 - alpha_3d[low_alpha_mask]) * texture_region[low_alpha_mask]
+                )
+            
+            # Transparent pixels remain unchanged (they keep the base texture)
+            
+            base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width] = blended.astype(np.uint8)
+            
         else:
-            alpha = np.ones((logo_height, logo_width, 1))
+            # For RGB logos without alpha, try to detect and remove white backgrounds
             logo_rgb = logo_resized
-        
-        # Vectorized blending
-        texture_region = base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width]
-        blended = (alpha * logo_rgb + (1 - alpha) * texture_region).astype(np.uint8)
-        base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width] = blended
+            
+            # Create alpha channel by detecting white/near-white pixels
+            white_threshold = 240
+            white_mask = np.all(logo_rgb >= white_threshold, axis=2)
+            
+            # Create alpha channel
+            alpha = np.ones(logo_rgb.shape[:2], dtype=np.float32)
+            alpha[white_mask] = 0.0  # Make white pixels transparent
+            
+            # Apply blending with generated alpha
+            texture_region = base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width].astype(np.float32)
+            logo_rgb_float = logo_rgb.astype(np.float32)
+            alpha_3d = np.stack([alpha] * 3, axis=2)
+            
+            non_transparent_mask = alpha > 0.05
+            blended = texture_region.copy()
+            
+            if np.any(non_transparent_mask):
+                blended[non_transparent_mask] = (
+                    alpha_3d[non_transparent_mask] * logo_rgb_float[non_transparent_mask] + 
+                    (1 - alpha_3d[non_transparent_mask]) * texture_region[non_transparent_mask]
+                )
+            
+            base_texture[start_y:start_y+logo_height, start_x:start_x+logo_width] = blended.astype(np.uint8)
         
         return base_texture, uv_coords, (start_x, start_y, logo_width, logo_height)
-    
+        
     def _create_curvature_aware_uv_mapping_optimized(self, vertices, faces, chest_center, right_vector, up_vector):
         """OPTIMIZED: Create UV mapping with vectorized operations and reduced smoothing"""
         if self._cached_chest_indices is None:
