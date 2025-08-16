@@ -258,16 +258,40 @@ class OptimizedChestLogo3D:
         print(f"Background removal: {np.sum(background_mask)} pixels made transparent")
         return result
 
+    def _get_correctly_oriented_logo(self, logo_image, right_vector, up_vector):
+        """Determine correct logo orientation based on mesh coordinate system"""
+        # Analyze the coordinate system orientation
+        # Check if we need to flip the logo based on the right_vector direction
+        
+        # If right_vector points in positive X direction, we might need different orientation
+        if right_vector[0] > 0:
+            # Right vector points right, normal orientation
+            if up_vector[1] > 0:
+                # Up vector points up, logo should be normal
+                return logo_image
+            else:
+                # Up vector points down, flip vertically
+                return cv2.flip(logo_image, 0)
+        else:
+            # Right vector points left, we need horizontal flip
+            if up_vector[1] > 0:
+                # Up vector points up, flip horizontally
+                return cv2.flip(logo_image, 1)
+            else:
+                # Up vector points down, flip both ways (180 degree rotation)
+                return cv2.rotate(logo_image, cv2.ROTATE_180)
+    
+    
     def create_chest_focused_texture(self, vertices, faces, chest_center, right_vector, up_vector, logo_image, logo_size=0.15):
-        """ENHANCED: Create texture with smart alpha blending and background removal"""
+        """ENHANCED: Create texture with smart alpha blending and automatic logo orientation correction"""
         # Pre-allocate arrays
         texture_size = 1024
         base_texture = np.full((texture_size, texture_size, 3), [210, 180, 140], dtype=np.uint8)
         
-        # Apply logo orientation correction
-        logo_corrected = cv2.rotate(logo_image, cv2.ROTATE_180)
+        # FIXED: Dynamic logo orientation correction based on mesh orientation
+        logo_corrected = self._get_correctly_oriented_logo(logo_image, right_vector, up_vector)
         
-        # Optimized logo resizing
+        # Rest of the method remains the same...
         logo_h, logo_w = logo_corrected.shape[:2]
         logo_aspect = logo_w / logo_h
         logo_pixel_size = int(texture_size * logo_size * 0.6)
